@@ -1,0 +1,102 @@
+version: "3.8"
+
+services:
+  # ── Honcho API (FastAPI server) ──────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: honcho-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # Database
+      - DB_CONNECTION_URI=postgresql+psycopg://honcho:${POSTGRES_PASSWORD}@database:5432/honcho
+
+      # LLM Provider API Keys
+      # Honcho uses OpenAI client for OpenAI-compatible endpoints.
+      # Set the key your Ollama Cloud endpoint expects:
+      - LLM_OPENAI_API_KEY=${OLLAMA_CLOUD_API_KEY}
+
+      # If you also want Anthropic-backed dialectic (optional):
+      # - LLM_ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+
+      # Disable auth for local/self-hosted use
+      - AUTH_USE_AUTH=false
+
+      # Redis cache
+      - CACHE_URL=redis://redis:6379/0
+
+      # Logging
+      - LOG_LEVEL=INFO
+    depends_on:
+      database:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - honcho-network
+
+  # ── Deriver (background reasoning worker) ────────────────────
+  deriver:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: honcho-deriver
+    restart: unless-stopped
+    entrypoint: ["uv", "run", "python", "-m", "src.deriver"]
+    environment:
+      # Must match the API's config exactly
+      - DB_CONNECTION_URI=postgresql+psycopg://honcho:${POSTGRES_PASSWORD}@database:5432/honcho
+      - LLM_OPENAI_API_KEY=${OLLAMA_CLOUD_API_KEY}
+      # - LLM_ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - AUTH_USE_AUTH=false
+      - CACHE_URL=redis://redis:6379/0
+      - LOG_LEVEL=INFO
+    depends_on:
+      database:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - honcho-network
+
+  # ── PostgreSQL + pgvector ────────────────────────────────────
+  database:
+    image: pgvector/pgvector:pg15
+    container_name: honcho-postgres
+    restart: unless-stopped
+    command: ["postgres", "-c", "max_connections=800"]
+    environment:
+      - POSTGRES_DB=honcho
+      - POSTGRES_USER=honcho
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_HOST_AUTH_METHOD=trust
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U honcho -d honcho"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - honcho-network
+
+  # ── Redis ────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: honcho-redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    networks:
+      - honcho-network
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  honcho-network:
