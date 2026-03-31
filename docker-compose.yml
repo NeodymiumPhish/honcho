@@ -47,7 +47,7 @@ services:
       dockerfile: Dockerfile
     container_name: honcho-deriver
     restart: unless-stopped
-    entrypoint: ["uv", "run", "python", "-m", "src.deriver"]
+    entrypoint: ["python", "-m", "src.deriver"]
     environment:
       # Must match the API's config exactly
       - DB_CONNECTION_URI=postgresql+psycopg://honcho:${POSTGRES_PASSWORD}@database:5432/honcho
