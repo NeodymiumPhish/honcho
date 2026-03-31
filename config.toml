@@ -55,10 +55,20 @@ MAX_TOOL_OUTPUT_CHARS = 10000
 MAX_MESSAGE_CONTENT_CHARS = 2000
 
 # Embeddings — local Ollama on your Windows NAS
-EMBEDDING_PROVIDER = "openai_compatible"
+# Using "openai" provider since Ollama exposes an OpenAI-compatible
+# /v1/embeddings endpoint. The base URL and API key are overridden
+# via env vars in docker-compose.yml:
+#   LLM_OPENAI_API_KEY=not-needed
+#   LLM_OPENAI_BASE_URL=http://10.0.0.4:11434/v1
+#
+# NOTE: This means the OpenAI provider is "claimed" by your local
+# Ollama for embeddings. The LLM agents use openai_compatible with
+# a separate base URL for Ollama Cloud. If the embedding client
+# does not honor EMBEDDING_BASE_URL, you may need to set
+# OPENAI_BASE_URL=http://10.0.0.4:11434/v1 as a raw env var
+# in docker-compose.yml instead.
+EMBEDDING_PROVIDER = "openai"
 EMBEDDING_MODEL = "embeddinggemma"
-EMBEDDING_BASE_URL = "http://10.0.0.4:11434/v1"
-EMBEDDING_API_KEY = "not-needed"
 
 # API keys set via env vars:
 #   LLM_OPENAI_COMPATIBLE_API_KEY
