@@ -103,7 +103,7 @@ services:
         dockerfile: Dockerfile
       container_name: honcho-migrate
       restart: "no"
-      entrypoint: ["uv", "run", "alembic", "upgrade", "head"]
+      entrypoint: ["uv", "run", "--no-dev", "alembic", "upgrade", "head"]
       environment:
         - DB_CONNECTION_URI=postgresql+psycopg://honcho:${POSTGRES_PASSWORD}@database:5432/honcho
       depends_on:
