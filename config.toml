@@ -103,32 +103,32 @@ HISTORY_TOKEN_LIMIT = 8192
 SESSION_HISTORY_MAX_TOKENS = 4096
 
 [dialectic.levels.minimal]
-PROVIDER = "openai_compatible"
+PROVIDER = "openai"
 MODEL = "kimi-k2.5"
 THINKING_BUDGET_TOKENS = 0
 MAX_TOOL_ITERATIONS = 1
 MAX_OUTPUT_TOKENS = 250
 
 [dialectic.levels.low]
-PROVIDER = "openai_compatible"
+PROVIDER = "openai"
 MODEL = "kimi-k2.5"
 THINKING_BUDGET_TOKENS = 0
 MAX_TOOL_ITERATIONS = 5
 
 [dialectic.levels.medium]
-PROVIDER = "openai_compatible"
+PROVIDER = "openai"
 MODEL = "kimi-k2.5"
 THINKING_BUDGET_TOKENS = 1024
 MAX_TOOL_ITERATIONS = 2
 
 [dialectic.levels.high]
-PROVIDER = "openai_compatible"
+PROVIDER = "openai"
 MODEL = "kimi-k2.5"
 THINKING_BUDGET_TOKENS = 1024
 MAX_TOOL_ITERATIONS = 4
 
 [dialectic.levels.max]
-PROVIDER = "openai_compatible"
+PROVIDER = "openai"
 MODEL = "kimi-k2.5"
 THINKING_BUDGET_TOKENS = 2048
 MAX_TOOL_ITERATIONS = 10
@@ -138,7 +138,7 @@ MAX_TOOL_ITERATIONS = 10
 ENABLED = true
 MESSAGES_PER_SHORT_SUMMARY = 20
 MESSAGES_PER_LONG_SUMMARY = 60
-PROVIDER = "openai_compatible"
+PROVIDER = "openai"
 MODEL = "kimi-k2.5"
 MAX_TOKENS_SHORT = 1000
 MAX_TOKENS_LONG = 4000
@@ -151,7 +151,7 @@ DOCUMENT_THRESHOLD = 50
 IDLE_TIMEOUT_MINUTES = 60
 MIN_HOURS_BETWEEN_DREAMS = 8
 ENABLED_TYPES = ["omni"]
-PROVIDER = "openai_compatible"
+PROVIDER = "openai"
 MODEL = "kimi-k2.5"
 MAX_OUTPUT_TOKENS = 16384
 THINKING_BUDGET_TOKENS = 8192
