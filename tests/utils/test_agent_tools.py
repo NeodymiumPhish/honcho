@@ -29,6 +29,7 @@ from src.utils.agent_tools import (
     _handle_grep_messages,  # pyright: ignore[reportPrivateUsage]
     _handle_search_memory,  # pyright: ignore[reportPrivateUsage]
     _handle_search_messages,  # pyright: ignore[reportPrivateUsage]
+    _handle_search_messages_temporal,  # pyright: ignore[reportPrivateUsage]
     _handle_update_peer_card,  # pyright: ignore[reportPrivateUsage]
     create_observations,
     create_tool_executor,
@@ -118,15 +119,17 @@ async def tool_test_data(
     for doc in documents:
         await db_session.refresh(doc)
 
-    yield workspace, peer1, peer2, session, messages, documents
+    # Commit so data is visible to independent tracked_db sessions.
+    # Tool handlers no longer share the test's db_session — they open
+    # their own short-lived sessions via tracked_db.
+    # _truncate_all_tables handles cleanup between tests.
+    await db_session.commit()
 
-    await db_session.rollback()
+    yield workspace, peer1, peer2, session, messages, documents
 
 
 @pytest.fixture
-def make_tool_context(
-    db_session: AsyncSession, tool_test_data: Any
-) -> Callable[..., ToolContext]:
+def make_tool_context(tool_test_data: Any) -> Callable[..., ToolContext]:
     """Factory fixture to create ToolContext with custom parameters."""
     workspace, peer1, peer2, session, _messages, _ = tool_test_data
     shared_lock = asyncio.Lock()
@@ -139,7 +142,6 @@ def make_tool_context(
         session_name: str | None = None,
     ) -> ToolContext:
         return ToolContext(
-            db=db_session,
             workspace_name=workspace.name,
             observer=peer1.name,
             observed=peer2.name,
@@ -248,7 +250,6 @@ class TestCreateObservations:
 
     async def test_batch_embedding_failure_falls_back_to_individual_embeds(
         self,
-        db_session: AsyncSession,
         tool_test_data: Any,
         monkeypatch: pytest.MonkeyPatch,
     ):
@@ -271,10 +272,10 @@ class TestCreateObservations:
             observer: str,
             observed: str,
             deduplicate: bool = False,
-        ) -> int:
+        ) -> list[Any]:
             _ = (workspace_name, observer, observed, deduplicate)
             created_documents.extend(documents)
-            return len(documents)
+            return documents
 
         monkeypatch.setattr(
             "src.utils.agent_tools.embedding_client.simple_batch_embed",
@@ -289,7 +290,6 @@ class TestCreateObservations:
         )
 
         result = await create_observations(
-            db_session,
             observations=[
                 schemas.ObservationInput(content="First obs", level="explicit"),
                 schemas.ObservationInput(content="Second obs", level="explicit"),
@@ -309,7 +309,6 @@ class TestCreateObservations:
 
     async def test_batch_embedding_failure_individual_embed_partial_failure(
         self,
-        db_session: AsyncSession,
         tool_test_data: Any,
         monkeypatch: pytest.MonkeyPatch,
     ):
@@ -334,10 +333,10 @@ class TestCreateObservations:
             observer: str,
             observed: str,
             deduplicate: bool = False,
-        ) -> int:
+        ) -> list[Any]:
             _ = (workspace_name, observer, observed, deduplicate)
             created_documents.extend(documents)
-            return len(documents)
+            return documents
 
         monkeypatch.setattr(
             "src.utils.agent_tools.embedding_client.simple_batch_embed",
@@ -352,7 +351,6 @@ class TestCreateObservations:
         )
 
         result = await create_observations(
-            db_session,
             observations=[
                 schemas.ObservationInput(content="Embeds fine", level="explicit"),
                 schemas.ObservationInput(content="Fails embed", level="explicit"),
@@ -393,6 +391,8 @@ class TestDeleteObservations:
 
         assert "Deleted 1 observations" in result
 
+        # Expire the document so the identity map picks up the committed soft-delete
+        db_session.expire(documents[0])
         # Verify soft-deletion (document still exists but has deleted_at timestamp)
         stmt = select(models.Document).where(models.Document.id == doc_id)
         doc = (await db_session.execute(stmt)).scalar_one_or_none()
@@ -482,7 +482,6 @@ class TestSearchMemory:
         await db_session.flush()
 
         ctx = ToolContext(
-            db=db_session,
             workspace_name=workspace.name,
             observer=peer1.name,
             observed=peer2.name,
@@ -530,15 +529,15 @@ class TestSearchMemory:
             return []
 
         async def fake_search_messages(
-            db: AsyncSession,
             workspace_name: str,
             session_name: str | None,
             query: str,
             limit: int = 10,
             context_window: int = 2,
             embedding: list[float] | None = None,
+            observer: str | None = None,
         ) -> list[tuple[list[models.Message], list[models.Message]]]:
-            _ = (db, workspace_name, session_name, query, limit, context_window)
+            _ = (workspace_name, session_name, query, limit, context_window, observer)
             fallback_embeddings.append(embedding)
             msg = models.Message(
                 workspace_name=ctx.workspace_name,
@@ -613,6 +612,78 @@ class TestGrepMessages:
 
 
 @pytest.mark.asyncio
+class TestSearchMessagesTemporal:
+    """Tests for _handle_search_messages_temporal."""
+
+    async def test_reuses_precomputed_embedding(
+        self,
+        make_tool_context: Callable[..., ToolContext],
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Embeds once and forwards the precomputed embedding to CRUD search."""
+        ctx = make_tool_context()
+
+        embed_calls: list[str] = []
+        forwarded_embeddings: list[list[float] | None] = []
+
+        async def fake_embed(query: str) -> list[float]:
+            embed_calls.append(query)
+            return [0.9, 0.1, 0.3]
+
+        async def fake_search_messages_temporal(
+            workspace_name: str,
+            session_name: str | None,
+            query: str,
+            after_date: datetime | None = None,
+            before_date: datetime | None = None,
+            limit: int = 10,
+            context_window: int = 2,
+            embedding: list[float] | None = None,
+            observer: str | None = None,
+        ) -> list[tuple[list[models.Message], list[models.Message]]]:
+            _ = (
+                workspace_name,
+                session_name,
+                query,
+                after_date,
+                before_date,
+                limit,
+                context_window,
+                observer,
+            )
+            forwarded_embeddings.append(embedding)
+            msg = models.Message(
+                workspace_name=ctx.workspace_name,
+                session_name=ctx.session_name,
+                peer_name=ctx.observed,
+                content="Relevant temporal fallback message",
+                seq_in_session=1,
+                token_count=5,
+                created_at=datetime.now(timezone.utc),
+            )
+            return [([msg], [msg])]
+
+        monkeypatch.setattr("src.utils.agent_tools.embedding_client.embed", fake_embed)
+        monkeypatch.setattr(
+            "src.utils.agent_tools.crud.search_messages_temporal",
+            fake_search_messages_temporal,
+        )
+
+        result = await _handle_search_messages_temporal(
+            ctx,
+            {
+                "query": "when did this happen",
+                "after_date": "2024-01-01",
+                "before_date": "2024-12-31",
+            },
+        )
+
+        assert "Found" in result
+        assert embed_calls == ["when did this happen"]
+        assert forwarded_embeddings == [[0.9, 0.1, 0.3]]
+
+
+@pytest.mark.asyncio
 class TestGetMessagesByDateRange:
     """Tests for _handle_get_messages_by_date_range."""
 
@@ -655,14 +726,12 @@ class TestGetRecentHistory:
 
     async def test_without_session_uses_observed(
         self,
-        db_session: AsyncSession,
         tool_test_data: Any,
     ):
         """Without session, retrieves messages from observed peer."""
         workspace, peer1, peer2, _, _, _ = tool_test_data
 
         ctx = ToolContext(
-            db=db_session,
             workspace_name=workspace.name,
             observer=peer1.name,
             observed=peer2.name,
@@ -779,6 +848,8 @@ class TestUpdatePeerCard:
 
         assert "Updated peer card" in result
 
+        # Refresh the observer so the identity map picks up the committed update
+        await db_session.refresh(peer1)
         # Verify DB state
         peer_card = await crud.get_peer_card(
             db_session,
@@ -804,6 +875,8 @@ class TestUpdatePeerCard:
 
         await _handle_update_peer_card(ctx, {"content": oversized})
 
+        # Refresh the observer so the identity map picks up the committed update
+        await db_session.refresh(peer1)
         peer_card = await crud.get_peer_card(
             db_session,
             workspace_name=workspace.name,
@@ -834,6 +907,8 @@ class TestUpdatePeerCard:
         result = await _handle_update_peer_card(ctx, {"content": None})
         assert "empty" in result.lower()
 
+        # Refresh the observer so the identity map picks up the committed update
+        await db_session.refresh(peer1)
         # Verify original card is preserved
         peer_card = await crud.get_peer_card(
             db_session,
@@ -861,6 +936,8 @@ class TestUpdatePeerCard:
         result = await _handle_update_peer_card(ctx, {"content": []})
         assert "empty" in result.lower()
 
+        # Refresh the observer so the identity map picks up the committed update
+        await db_session.refresh(peer1)
         # Verify original card is preserved
         peer_card = await crud.get_peer_card(
             db_session,
@@ -915,7 +992,6 @@ class TestGetPeerCard:
         await db_session.flush()
 
         ctx = ToolContext(
-            db=db_session,
             workspace_name=workspace.name,
             observer=peer1.name,
             observed=peer2.name,
@@ -970,7 +1046,6 @@ class TestExtractPreferences:
 
     async def test_falls_back_to_per_query_embedding_when_batch_fails(
         self,
-        db_session: AsyncSession,
         tool_test_data: Any,
         monkeypatch: pytest.MonkeyPatch,
     ):
@@ -989,15 +1064,15 @@ class TestExtractPreferences:
         embedding_args: list[list[float] | None] = []
 
         async def fake_search_messages(
-            _db: AsyncSession,
             workspace_name: str,
             session_name: str | None,
             query: str,
             limit: int,
             context_window: int,
             embedding: list[float] | None,
+            observer: str | None = None,
         ) -> list[tuple[list[models.Message], list[models.Message]]]:
-            _ = (limit, context_window)
+            _ = (limit, context_window, observer)
             embedding_args.append(embedding)
             msg = models.Message(
                 workspace_name=workspace_name,
@@ -1023,7 +1098,6 @@ class TestExtractPreferences:
         )
 
         result = await extract_preferences(
-            db_session,
             workspace_name=workspace.name,
             session_name=session.name,
             observed=observed_peer.name,
@@ -1062,14 +1136,11 @@ class TestFinishConsolidation:
 class TestToolExecutor:
     """Tests for create_tool_executor and the executor function."""
 
-    async def test_create_tool_executor_returns_callable(
-        self, db_session: AsyncSession, tool_test_data: Any
-    ):
+    async def test_create_tool_executor_returns_callable(self, tool_test_data: Any):
         """create_tool_executor returns an async callable."""
         workspace, peer1, peer2, session, _, _ = tool_test_data
 
         executor = await create_tool_executor(
-            db=db_session,
             workspace_name=workspace.name,
             observer=peer1.name,
             observed=peer2.name,
@@ -1078,14 +1149,11 @@ class TestToolExecutor:
 
         assert callable(executor)
 
-    async def test_executor_routes_to_correct_handler(
-        self, db_session: AsyncSession, tool_test_data: Any
-    ):
+    async def test_executor_routes_to_correct_handler(self, tool_test_data: Any):
         """Executor routes tool calls to correct handlers."""
         workspace, peer1, peer2, session, _, _ = tool_test_data
 
         executor = await create_tool_executor(
-            db=db_session,
             workspace_name=workspace.name,
             observer=peer1.name,
             observed=peer2.name,
@@ -1098,14 +1166,11 @@ class TestToolExecutor:
         # Should be from get_peer_card handler
         assert "peer card" in result.lower() or "No peer card" in result
 
-    async def test_executor_unknown_tool_returns_error(
-        self, db_session: AsyncSession, tool_test_data: Any
-    ):
+    async def test_executor_unknown_tool_returns_error(self, tool_test_data: Any):
         """Unknown tool name returns error message."""
         workspace, peer1, peer2, session, _, _ = tool_test_data
 
         executor = await create_tool_executor(
-            db=db_session,
             workspace_name=workspace.name,
             observer=peer1.name,
             observed=peer2.name,
@@ -1116,14 +1181,11 @@ class TestToolExecutor:
 
         assert "Unknown tool" in result
 
-    async def test_executor_handles_exceptions_gracefully(
-        self, db_session: AsyncSession, tool_test_data: Any
-    ):
+    async def test_executor_handles_exceptions_gracefully(self, tool_test_data: Any):
         """Executor converts exceptions to error strings instead of raising."""
         workspace, peer1, peer2, session, _, _ = tool_test_data
 
         executor = await create_tool_executor(
-            db=db_session,
             workspace_name=workspace.name,
             observer=peer1.name,
             observed=peer2.name,
@@ -1137,13 +1199,12 @@ class TestToolExecutor:
         # Should contain error info, not raise exception
 
     async def test_executor_dreamer_context_includes_observation_ids(
-        self, db_session: AsyncSession, tool_test_data: Any
+        self, tool_test_data: Any
     ):
         """Dreamer context (include_observation_ids=True) shows IDs in output."""
         workspace, peer1, peer2, session, _, _ = tool_test_data
 
         executor = await create_tool_executor(
-            db=db_session,
             workspace_name=workspace.name,
             observer=peer1.name,
             observed=peer2.name,
@@ -1304,3 +1365,55 @@ class TestObservationLockRegistry:
         # All 100 entries should be cleaned up
         remaining = sum(1 for k in _observation_locks if k[0].startswith("ws_growth_"))
         assert remaining == 0
+
+
+@pytest.mark.asyncio
+class TestObserverPeerNameWiring:
+    """Tests that tool handlers pass observer to CRUD functions."""
+
+    async def test_grep_messages_passes_observer(
+        self,
+        make_tool_context: Callable[..., ToolContext],
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """_handle_grep_messages passes ctx.observer as observer."""
+        ctx = make_tool_context()
+        captured_kwargs: dict[str, Any] = {}
+
+        async def fake_grep_messages(
+            **kwargs: Any,
+        ) -> list[tuple[list[models.Message], list[models.Message]]]:
+            captured_kwargs.update(kwargs)
+            return []
+
+        monkeypatch.setattr(
+            "src.utils.agent_tools.crud.grep_messages", fake_grep_messages
+        )
+
+        await _handle_grep_messages(ctx, {"text": "hello"})
+
+        assert captured_kwargs["observer"] == ctx.observer
+
+    async def test_get_messages_by_date_range_passes_observer(
+        self,
+        make_tool_context: Callable[..., ToolContext],
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """_handle_get_messages_by_date_range passes ctx.observer as observer."""
+        ctx = make_tool_context()
+        captured_kwargs: dict[str, Any] = {}
+
+        async def fake_get_messages_by_date_range(
+            _db: Any, **kwargs: Any
+        ) -> list[models.Message]:
+            captured_kwargs.update(kwargs)
+            return []
+
+        monkeypatch.setattr(
+            "src.utils.agent_tools.crud.get_messages_by_date_range",
+            fake_get_messages_by_date_range,
+        )
+
+        await _handle_get_messages_by_date_range(ctx, {"after_date": "2024-01-01"})
+
+        assert captured_kwargs["observer"] == ctx.observer
